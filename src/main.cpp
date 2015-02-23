@@ -27,6 +27,9 @@
 #define FRAME_TOTAL_LENGTH 18400 * TIMER_SCALE
 #define FILTER_DEPTH 7
 
+#define LED_PORT PORTB
+#define LED_PIN  PB5
+#define LED_DDR  DDRB
 
 uint32_t timer_switches[CHANNEL_MAX] = { 0, 0, 0, 0, 0, 0, 0, 0 };
 uint16_t values[CHANNEL_MAX] =
@@ -39,7 +42,7 @@ uint16_t values[CHANNEL_MAX] =
   CHANNEL_VALUE_INIT,
   CHANNEL_VALUE_INIT,
   CHANNEL_VALUE_INIT
-  };
+};
 uint16_t filter_array[FILTER_DEPTH][8];
 uint8_t  filterIdx[FILTER_DEPTH];
 
@@ -93,6 +96,8 @@ void init()
 
   DDRB |= (( 1 << 1 ) | ( 1 << 2));
 
+  sbi(LED_DDR, LED_PIN);
+
   OCR1A = FRAME_TOTAL_LENGTH;
 
   TCCR2A = 0;
@@ -123,9 +128,9 @@ int main()
 
 #define DIFF_OVFL(v1, v2) (v1 - v2) & 0xFFFF
 
-#define NOW (((uint32_t)tcount) << 8) | TCNT2
+#define NOW ( (((uint32_t)tcount) << 8) | TCNT2 )
 
-#define TIME_DIFF(idx) ( (timer_switches[idx] == 0) ? (1500 * TIMER_SCALE) : DIFF_OVFL(time, timer_switches[idx]) )
+#define TIME_DIFF(idx) ( (timer_switches[idx] == 0) ? CHANNEL_VALUE_INIT : DIFF_OVFL(NOW, timer_switches[idx]) )
 
 inline uint16_t CHECKVAL(uint32_t val, uint32_t prev)
 {
@@ -136,14 +141,13 @@ inline void checkPortPins(uint8_t pin, uint8_t channel, uint8_t *state, uint8_t 
 {
   const uint8_t diff = pins ^ *state;
   const uint8_t mask = 1 << pin;
-  const uint32_t time = NOW;
 
   if (mask & diff)
   {
     if (pins & mask)
     {
-      timer_switches[channel] = time;
-      *state |= mask;
+      timer_switches[channel] = NOW;
+      sbi(*state, pin);
     }
     else
     {
@@ -153,7 +157,7 @@ inline void checkPortPins(uint8_t pin, uint8_t channel, uint8_t *state, uint8_t 
       if (filterIdx[channel] == FILTER_DEPTH)
         filterIdx[channel] = 0;
 
-      *state &= ~mask;
+      cbi(*state, pin);
     }
   }
 }
@@ -162,20 +166,28 @@ ISR(PCINT0_vect)
 {
   static byte state = 0;
 
+  sbi(LED_PORT, LED_PIN);
+
   checkPortPins(0, 5, &state, PINB);
   checkPortPins(3, 6, &state, PINB);
   checkPortPins(4, 7, &state, PINB);
+
+  cbi(LED_PORT, LED_PIN);
 }
 
 ISR(PCINT2_vect)
 {
   static byte state = 0;
 
+  sbi(LED_PORT, LED_PIN);
+
   checkPortPins(2, 0, &state, PIND);
   checkPortPins(4, 1, &state, PIND);
   checkPortPins(5, 2, &state, PIND);
   checkPortPins(6, 3, &state, PIND);
   checkPortPins(7, 4, &state, PIND);
+
+  cbi(LED_PORT, LED_PIN);
 }
 
 ISR(TIMER2_OVF_vect)
@@ -192,7 +204,6 @@ inline uint16_t getChannel(uint8_t ch, int16_t vv)
   int32_t v = 0;
   for (uint8_t i = 0; i < FILTER_DEPTH; i++)
     v += filter_array[i][ch];
-
   v = v / FILTER_DEPTH;
 
   return (abs(v - vv) > TRESHHOLD) ? v : vv;

@@ -18,14 +18,17 @@ const byte PWM_CHANNEL_MAX = 8;
 #include "config.h"
 
 #define PWM_PORT  PORTD
-#define PWM_PIN   PIND
-#define PWM_DDR   DDRB
+#define PWM_PINS  PIND
+#define PWM_DDR   DDRD
 #define PWM_PCMSK PCMSK2
 #define PWM_PCIE  PCIE2
 
-#define LED_PORT PORTB
-#define LED_PIN  PB5
+#define PPM_DDR DDRB
+#define PPM_PIN PB1
+
 #define LED_DDR  DDRB
+#define LED_PORT PORTB
+#define LED_PIN  PB0
 
 enum PWM_CHANNEL
 {
@@ -51,7 +54,7 @@ uint16_t values[PWM_CHANNEL_MAX] =
   CHANNEL_VALUE_INIT,
   CHANNEL_VALUE_INIT
 };
-uint16_t filter_array[FILTER_DEPTH][8];
+uint16_t filter_array[FILTER_DEPTH][PWM_CHANNEL_MAX];
 byte     filterIdx[FILTER_DEPTH];
 
 volatile uint16_t timer_counter = 0;
@@ -61,6 +64,8 @@ volatile bool PWM_haveSignal = false;
 
 void init()
 {
+  // Init global vars
+
   for (byte i = 0; i < FILTER_DEPTH; ++i)
   {
     filterIdx[i] = 0;
@@ -68,42 +73,52 @@ void init()
       filter_array[i][j] = CHANNEL_VALUE_INIT;
   }
 
+  // Init LED
+
   sbi(LED_DDR, LED_PIN);
+
+  // Init PWM input
 
   PWM_DDR   = 0x00;
   PWM_PORT  = 0xFF;
   PWM_PCMSK = 0xFF;
   sbi(PCICR, PWM_PCIE);
 
+  // Init PPM output
+
+  sbi(PPM_DDR, PPM_PIN);
+
   TCCR1A =
-    (0<<WGM10)  |
-    (0<<WGM11)  |
-    (0<<COM1A1) |
-    (1<<COM1A0) | // Toggle pin om compare-match
-    (0<<COM1B1) |
-    (0<<COM1B0);
+    (0 << WGM10)  |
+    (0 << WGM11)  |
+    (0 << COM1A1) |
+    (0 << COM1A0) |
+    (0 << COM1B1) | //
+    (0 << COM1B0);  // By start PPM disabled
 
   TCCR1B =
-    (0<<ICNC1) | //
-    (0<<ICES1) | //
-    (0<<CS10)  | //
-    (1<<CS11)  | // Prescale 8
-    (0<<CS12)  | //
-    (0<<WGM13) |
-    (1<<WGM12);  // CTC mode (Clear timer on compare match) with OCR1A as top.
+    (0 << ICNC1) | //
+    (0 << ICES1) | //
+    (0 << CS10)  | //
+    (1 << CS11)  | // Prescale 8
+    (0 << CS12)  | //
+    (0 << WGM13) |
+    (1 << WGM12);  // CTC mode (Clear timer on compare match) with OCR1A as top.
 
   TIMSK1 =
-    (1<<OCIE1A) | // Interrupt on compare A
-    (0<<OCIE1B) | // Disable interrupt on compare B
-    (0<<TOIE1);
+    (0 << OCIE1A) | // Disable interrupt on compare A
+    (0 << OCIE1B) | // Disable interrupt on compare B
+    (0 << TOIE1);
 
-  OCR1A = FRAME_TOTAL_LENGTH;
+  // Init clock time
 
   TCCR2A = 0;
-  TCCR2B = (1<<CS21);  // Prescale 8
+  TCCR2B = (1 << CS21);  // Prescale 8
   TCNT2  = 0;
 
   TIMSK2 = (1 << TOIE2);
+
+  // Start work
 
   sei();
 }
@@ -116,27 +131,21 @@ int main()
 }
 
 
-// ============================================
-// Read PWM
-// ============================================
+//
+// PWM input
+//
 
 #define NOW ( (((uint32_t)timer_counter) << 8) | TCNT2 )
 
-inline uint16_t inrange(const uint32_t val)
+inline uint16_t inrange(const uint32_t val, const uint16_t prev)
 {
-  if (val < CHANNEL_VALUE_MIN)
-    return CHANNEL_VALUE_MIN;
-
-  if (val > CHANNEL_VALUE_MAX)
-    return CHANNEL_VALUE_MAX;
-
-  return val;
+  return (val >= CHANNEL_VALUE_MIN && val <= CHANNEL_VALUE_MAX) ? val : prev;
 }
 
 inline void checkPortPins(const uint8_t pins, const uint8_t pin, uint8_t *state, const uint8_t pwm_ch)
 {
   const uint8_t diff = pins ^ *state;
-  const uint8_t mask = 1 << pin;
+  const uint8_t mask = 1U << pin;
 
   if (mask & diff)
   {
@@ -150,7 +159,7 @@ inline void checkPortPins(const uint8_t pins, const uint8_t pin, uint8_t *state,
       byte& Idx = filterIdx[pwm_ch];
       filter_array[Idx][pwm_ch] = (timer_switches[pwm_ch] == 0) ?
                                     CHANNEL_VALUE_INIT :
-                                    inrange(NOW - timer_switches[pwm_ch]);
+                                    inrange(NOW - timer_switches[pwm_ch], values[pwm_ch]);
 
       if (++Idx == FILTER_DEPTH)
         Idx = 0;
@@ -162,14 +171,24 @@ inline void checkPortPins(const uint8_t pins, const uint8_t pin, uint8_t *state,
 
 inline void PWM_getSignal()
 {
+  PWM_last_update = NOW;
+
   if (PWM_haveSignal)
     return;
 
+  cli();
+
   PWM_haveSignal  = true;
-  PWM_last_update = NOW;
 
   sbi(LED_PORT, LED_PIN);
+
+  cbi(TCCR1A, COM1A1); //
+  sbi(TCCR1A, COM1A0); // Toggle PPM pin on compare-match
   sbi(TIMSK1, OCIE1A); // Enable interrupt on compare A
+
+  OCR1A = PWM_LOST_TIME;
+
+  sei();
 }
 
 inline void PWM_lostSignal()
@@ -180,6 +199,8 @@ inline void PWM_lostSignal()
   PWM_haveSignal = false;
 
   cbi(LED_PORT, LED_PIN);
+
+  // PPM interrupt will disable in ISR(TIMER1_COMPA_vect) by onsync
 }
 
 ISR(PCINT2_vect)
@@ -188,45 +209,45 @@ ISR(PCINT2_vect)
 
   checkPortPins(PIND, PD0, &PORT_state, PWM_CH0);
 #if PWM_NUMBER_OF_CHANNELS >= 2
-  checkPortPins(PWM_PIN, PD1, &PORT_state, PWM_CH1);
+  checkPortPins(PWM_PINS, PD1, &PORT_state, PWM_CH1);
 #endif
 #if PWM_NUMBER_OF_CHANNELS >= 3
-  checkPortPins(PWM_PIN, PD2, &PORT_state, PWM_CH2);
+  checkPortPins(PWM_PINS, PD2, &PORT_state, PWM_CH2);
 #endif
 #if PWM_NUMBER_OF_CHANNELS >= 4
-  checkPortPins(PWM_PIN, PD3, &PORT_state, PWM_CH3);
+  checkPortPins(PWM_PINS, PD3, &PORT_state, PWM_CH3);
 #endif
 #if PWM_NUMBER_OF_CHANNELS >= 5
-  checkPortPins(PWM_PIN, PD4, &PORT_state, PWM_CH4);
+  checkPortPins(PWM_PINS, PD4, &PORT_state, PWM_CH4);
 #endif
 #if PWM_NUMBER_OF_CHANNELS >= 6
-  checkPortPins(PWM_PIN, PD4, &PORT_state, PWM_CH5);
+  checkPortPins(PWM_PINS, PD5, &PORT_state, PWM_CH5);
 #endif
 #if PWM_NUMBER_OF_CHANNELS >= 7
-  checkPortPins(PWM_PIN, PD4, &PORT_state, PWM_CH6);
+  checkPortPins(PWM_PINS, PD6, &PORT_state, PWM_CH6);
 #endif
 #if PWM_NUMBER_OF_CHANNELS == 8
-  checkPortPins(PWM_PIN, PD4, &PORT_state, PWM_CH7);
+  checkPortPins(PWM_PINS, PD7, &PORT_state, PWM_CH7);
 #endif
 
   PWM_getSignal();
 }
 
-// ========================================
-// Clock time
-// ========================================
+//
+// Clock time and check PWM lost
+//
 
 ISR(TIMER2_OVF_vect)
 {
   timer_counter++;
 
   if (NOW - PWM_last_update > PWM_LOST_TIME)
-    cbi(LED_PORT, LED_PIN);
+    PWM_lostSignal();
 }
 
-// ========================================
+//
 // Generate PPM
-// ========================================
+//
 
 inline uint16_t getChannel(uint8_t ch, uint16_t vv)
 {
@@ -249,17 +270,15 @@ ISR(TIMER1_COMPA_vect)
   {
     if (!PWM_haveSignal)
     {
-      cbi(TIMSK1, OCIE1A); // Don't start new PPM generation, disable interrupt on compare A
+      // Don't start new PPM generation, disable interrupt on compare A
+      cbi(TCCR1A, COM1A1);
+      cbi(TCCR1A, COM1A0);
+      cbi(TIMSK1, OCIE1A);
       return;
     }
 
-    TCCR1A =
-      (0<<WGM10)  |
-      (0<<WGM11)  |
-      (1<<COM1A1) |
-      (1<<COM1A0) |
-      (0<<COM1B1) |
-      (0<<COM1B0);
+    sbi(TCCR1A, COM1A1); //
+    sbi(TCCR1A, COM1A0); // Set PPM pin on Compare Match (Set output to high level).
 
     channel_number = 0;
     onsync  = false;
@@ -272,14 +291,8 @@ ISR(TIMER1_COMPA_vect)
   {
     if (channel_number == 0)
     {
-      // After first time, when pin have been set high, we toggle the pin at each interrupt
-      TCCR1A =
-        (0<<WGM10)  |
-        (0<<WGM11)  |
-        (0<<COM1A1) |
-        (1<<COM1A0) |
-        (0<<COM1B1) |
-        (0<<COM1B0);
+      cbi(TCCR1A, COM1A1); //
+      sbi(TCCR1A, COM1A0); // After first time, when PPM pin have been set high, we toggle the pin at each interrupt
     }
     if(channel_number < PWM_NUMBER_OF_CHANNELS)
     {

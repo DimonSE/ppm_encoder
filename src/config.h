@@ -2,7 +2,7 @@
 #define __CONFIG_H__
 
 // Dead-time between each channel in the PPM-stream. (in microseconds)
-const uint16_t DEAD_TIME = 150 * TIMER_SCALE;
+const uint16_t DEAD_TIME = 300 * TIMER_SCALE;
 
 // Minimal and maximal value of channel (in microseconds)
 const uint16_t CHANNEL_VALUE_MIN = 900  * TIMER_SCALE;
